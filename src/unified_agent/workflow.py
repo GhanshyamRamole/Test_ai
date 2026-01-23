@@ -5,14 +5,16 @@ from datetime import timedelta
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
-# Add parent dir to path to import config and docker_monitor
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# --- PATH FIX ---
+# We are in src/unified_agent/workflow.py. 
+# Go up 3 levels to reach project root (where config is)
+root_path = Path(__file__).parents[2]
+sys.path.insert(0, str(root_path))
+# ----------------
 
 from config import AWS_REGION, BEDROCK_MODEL_ID
 
-# --- Import Activities from your existing modules ---
-# We reuse the logic you already have to avoid duplication
-
+# Activities are imported assuming 'src' is in path (handled by worker.py)
 from providers.infra_monitor.docker_temporal_agent import (
     get_container_status_activity,
     check_container_health_activity,
@@ -29,51 +31,36 @@ logger = logging.getLogger(__name__)
 
 @activity.defn
 async def unified_orchestrator_activity(task: str) -> str:
-    """
-    The 'Brain': Analyzes natural language and plans a sequence of actions 
-    combining Docker ops and General utility tools.
-    """
-    from strands import Agent
-    from strands.models import BedrockModel
-
-    # Combined System Prompt handling both domains
-    system_prompt = """You are a Super DevOps Agent. Analyze the user request and return a comma-separated list of operations.
-
-    Available Docker Operations:
-    - status[:filter]       -> Get container status
-    - health[:container]    -> Check health 
-    - logs:container[:lines]-> Get logs
-    - restart:container     -> Restart container
-
-    Available Utility Operations:
-    - time                  -> Get current server time
-    - weather:city          -> Get weather
-    - fact:topic            -> Get an interesting fact
-
-    Examples:
-    "restart nginx and check weather in London" -> "restart:nginx, weather:London"
-    "is redis healthy?"                         -> "health:redis"
-    "what time is it and show logs for api"     -> "time, logs:api"
-
-    Return ONLY the comma-separated plan. No explanations."""
-
-    agent = Agent(
-        model=BedrockModel(
-            model_id=BEDROCK_MODEL_ID,
-            region_name=AWS_REGION
-        ),
-        system_prompt=system_prompt
-    )
-
+    """The 'Brain': Analyzes natural language and plans a sequence of actions."""
     try:
-        # Get the plan from the LLM
+        from strands import Agent
+        from strands.models import BedrockModel
+
+        system_prompt = """You are a Super DevOps Agent. Analyze the user request and return a comma-separated list of operations.
+        Available Operations:
+        - status[:filter]
+        - health[:container]
+        - logs:container[:lines]
+        - restart:container
+        - time
+        - weather:city
+        - fact:topic
+        
+        Example: "restart nginx" -> "restart:nginx"
+        Return ONLY the plan string."""
+
+        agent = Agent(
+            model=BedrockModel(model_id=BEDROCK_MODEL_ID, region_name=AWS_REGION),
+            system_prompt=system_prompt
+        )
         result = agent(task)
         plan = str(result.content if hasattr(result, 'content') else result).strip()
         logger.info(f"Orchestrator Plan: {plan}")
         return plan
     except Exception as e:
         logger.error(f"Orchestration failed: {e}")
-        return "status" # Fallback to a safe read-only op
+        # Fallback for testing/error cases
+        return "status"
 
 @workflow.defn
 class UnifiedAgentWorkflow:
@@ -81,7 +68,6 @@ class UnifiedAgentWorkflow:
     async def run(self, task: str) -> str:
         workflow.logger.info(f"Processing Unified Task: {task}")
         
-        # Step 1: Ask the AI Orchestrator for a plan
         plan = await workflow.execute_activity(
             unified_orchestrator_activity,
             task,
@@ -92,19 +78,15 @@ class UnifiedAgentWorkflow:
         results = []
         operations = [op.strip() for op in plan.split(',') if op.strip()]
 
-        # Step 2: Execute the plan
         for op_spec in operations:
             try:
-                # Parse the operation string (e.g., "weather:London" -> op="weather", param="London")
                 parts = op_spec.split(':')
                 op_type = parts[0].lower()
                 param1 = parts[1] if len(parts) > 1 else None
                 param2 = parts[2] if len(parts) > 2 else None
 
-                # --- Dispatcher Logic ---
                 result = None
                 
-                # Docker Domain
                 if op_type == 'status':
                     result = await workflow.execute_activity(get_container_status_activity, param1, start_to_close_timeout=timedelta(seconds=10))
                 elif op_type == 'health':
@@ -113,11 +95,7 @@ class UnifiedAgentWorkflow:
                     lines = int(param2) if param2 else 100
                     result = await workflow.execute_activity(get_container_logs_activity, args=[param1, lines], start_to_close_timeout=timedelta(seconds=10))
                 elif op_type == 'restart':
-                    # High retry policy for critical mutations
-                    result = await workflow.execute_activity(restart_container_activity, param1, start_to_close_timeout=timedelta(seconds=30), 
-                        retry_policy=RetryPolicy(maximum_attempts=5))
-
-                # Utility Domain
+                    result = await workflow.execute_activity(restart_container_activity, param1, start_to_close_timeout=timedelta(seconds=30))
                 elif op_type == 'time':
                     result = await workflow.execute_activity(get_time_activity, start_to_close_timeout=timedelta(seconds=5))
                 elif op_type == 'weather' and param1:
@@ -125,13 +103,8 @@ class UnifiedAgentWorkflow:
                 elif op_type == 'fact' and param1:
                     result = await workflow.execute_activity(get_fact_activity, param1, start_to_close_timeout=timedelta(seconds=20))
                 
-                else:
-                    result = f"Skipped unknown operation: {op_spec}"
-
-                results.append(result)
-
+                results.append(str(result))
             except Exception as e:
-                workflow.logger.error(f"Failed step {op_spec}: {e}")
                 results.append(f"❌ Step '{op_spec}' failed: {str(e)}")
 
         return "\n\n".join(results)

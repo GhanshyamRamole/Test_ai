@@ -4,7 +4,9 @@ import sys
 from pathlib import Path
 from temporalio.client import Client
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+src_path = Path(__file__).parent / "src"
+sys.path.insert(0, str(src_path))
+
 from config import TEMPORAL_HOST
 from unified_agent.workflow import UnifiedAgentWorkflow
 

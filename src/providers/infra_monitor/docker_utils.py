@@ -9,7 +9,8 @@ from typing import List, Dict, Optional, Any
 import docker
 from docker.errors import DockerException, NotFound, APIError
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+root_path = Path(__file__).parents[3]
+sys.path.insert(0, str(root_path))
 
 from config import (
     DOCKER_HOST,
