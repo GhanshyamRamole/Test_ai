@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @activity.defn
 async def get_container_status_activity(filter_by: str = None) -> str:
     """Get container status with optional filtering."""
-    from docker_monitor.docker_utils import DockerClientWrapper, DockerConnectionError
+    from infra_monitor.docker_utils import DockerClientWrapper, DockerConnectionError
     
     activity.logger.info(f"Getting container status, filter: {filter_by}")
     
