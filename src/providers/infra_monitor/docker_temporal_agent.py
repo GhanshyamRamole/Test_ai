@@ -1,22 +1,21 @@
 """Temporal Docker Container Health Monitor with automatic retries and fault tolerance."""
 
-import sys
-from pathlib import Path
 import logging
 from datetime import timedelta
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# --- Imports fixed for 'src' structure ---
+from config import AWS_REGION, BEDROCK_MODEL_ID
 
 logger = logging.getLogger(__name__)
-
 
 @activity.defn
 async def get_container_status_activity(filter_by: str = None) -> str:
     """Get container status with optional filtering."""
-    from infra_monitor.docker_utils import DockerClientWrapper, DockerConnectionError
+    # Fixed Import
+    from providers.infra_monitor.docker_utils import DockerClientWrapper, DockerConnectionError
     
     activity.logger.info(f"Getting container status, filter: {filter_by}")
     
@@ -54,7 +53,8 @@ async def get_container_status_activity(filter_by: str = None) -> str:
 @activity.defn
 async def check_container_health_activity(container_name: str = None) -> str:
     """Check health of specific container or all containers."""
-    from docker_monitor.docker_utils import DockerClientWrapper, DockerConnectionError, ContainerNotFoundError
+    # Fixed Import
+    from providers.infra_monitor.docker_utils import DockerClientWrapper, DockerConnectionError, ContainerNotFoundError
     
     activity.logger.info(f"Checking container health: {container_name or 'all'}")
     
@@ -102,7 +102,8 @@ async def check_container_health_activity(container_name: str = None) -> str:
 @activity.defn
 async def get_container_logs_activity(container_name: str, lines: int = 100) -> str:
     """Retrieve container logs."""
-    from docker_monitor.docker_utils import DockerClientWrapper, DockerConnectionError, ContainerNotFoundError
+    # Fixed Import
+    from providers.infra_monitor.docker_utils import DockerClientWrapper, DockerConnectionError, ContainerNotFoundError
     
     activity.logger.info(f"Getting logs for {container_name}, lines: {lines}")
     
@@ -134,7 +135,8 @@ async def get_container_logs_activity(container_name: str, lines: int = 100) -> 
 @activity.defn
 async def restart_container_activity(container_name: str) -> str:
     """Restart a container."""
-    from docker_monitor.docker_utils import DockerClientWrapper, DockerConnectionError, ContainerNotFoundError
+    # Fixed Import
+    from providers.infra_monitor.docker_utils import DockerClientWrapper, DockerConnectionError, ContainerNotFoundError
     
     activity.logger.info(f"Restarting container: {container_name}")
     
@@ -160,159 +162,3 @@ async def restart_container_activity(container_name: str) -> str:
         raise ApplicationError(f"Unexpected error: {str(e)}", non_retryable=True)
 
 
-@activity.defn
-async def ai_orchestrator_activity(task: str) -> str:
-    """AI-powered task orchestration that analyzes queries and returns operation plans."""
-    from config import AWS_REGION, BEDROCK_MODEL_ID
-    
-    activity.logger.info(f"AI orchestrator processing task: {task}")
-    
-    try:
-        from strands import Agent
-        from strands.models import BedrockModel
-        
-        agent = Agent(
-            model=BedrockModel(
-                model_id=BEDROCK_MODEL_ID,
-                region_name=AWS_REGION
-            ),
-            system_prompt="""Analyze the user request and return a comma-separated list of Docker operations.
-
-Available operations:
-- status[:filter] - Get container status (optionally filtered by name or status)
-- health[:container] - Check health (specific container or all if omitted)
-- logs:container[:lines] - Get container logs (default 100 lines)
-- restart:container - Restart a container
-
-Examples:
-"check container status" -> "status"
-"show me nginx logs" -> "logs:nginx"
-"is redis healthy?" -> "health:redis"
-"restart postgres" -> "restart:postgres"
-"check nginx health and show logs" -> "health:nginx,logs:nginx"
-"show running containers" -> "status:running"
-
-Return ONLY the comma-separated operation list, no explanations."""
-        )
-        
-        result = agent(task)
-        plan = str(result.content if hasattr(result, 'content') else result).strip()
-        
-        if not plan or len(plan) > 200:
-            activity.logger.warning(f"AI returned invalid plan: {plan}")
-            plan = "status"
-        
-        activity.logger.info(f"AI orchestrator generated plan: {plan}")
-        return plan
-        
-    except Exception as e:
-        activity.logger.warning(f"AI orchestrator failed: {e}, falling back to 'status'")
-        return "status"
-
-
-@workflow.defn
-class DockerMonitorWorkflow:
-    """Temporal workflow for Docker container monitoring with automatic retries."""
-    
-    @workflow.run
-    async def run(self, task: str) -> str:
-        """Execute Docker monitoring workflow."""
-        workflow.logger.info(f"Starting Docker monitor workflow for task: {task}")
-        
-        plan = await workflow.execute_activity(
-            ai_orchestrator_activity,
-            task,
-            start_to_close_timeout=timedelta(seconds=15),
-            retry_policy=RetryPolicy(
-                maximum_attempts=2,
-                initial_interval=timedelta(seconds=1),
-                maximum_interval=timedelta(seconds=1),
-                backoff_coefficient=1.0
-            )
-        )
-        
-        workflow.logger.info(f"Execution plan: {plan}")
-        
-        results = []
-        operations = [op.strip() for op in plan.split(',') if op.strip()]
-        
-        for operation_spec in operations:
-            try:
-                result = await self._execute_operation(operation_spec)
-                results.append(result)
-            except Exception as e:
-                workflow.logger.error(f"Operation {operation_spec} failed: {e}")
-                results.append(f"Operation '{operation_spec}' failed: {str(e)}")
-        
-        final_result = "\n\n".join(results)
-        workflow.logger.info("Workflow completed successfully")
-        return final_result
-    
-    async def _execute_operation(self, operation_spec: str) -> str:
-        """Execute a single operation based on the operation specification."""
-        parts = operation_spec.split(':')
-        operation = parts[0].lower()
-        param1 = parts[1] if len(parts) > 1 else None
-        param2 = parts[2] if len(parts) > 2 else None
-        
-        if operation == 'status':
-            return await workflow.execute_activity(
-                get_container_status_activity,
-                param1,
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=3,
-                    initial_interval=timedelta(seconds=1),
-                    maximum_interval=timedelta(seconds=5),
-                    backoff_coefficient=2.0
-                )
-            )
-        
-        elif operation == 'health':
-            return await workflow.execute_activity(
-                check_container_health_activity,
-                param1,
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=3,
-                    initial_interval=timedelta(seconds=2),
-                    maximum_interval=timedelta(seconds=10),
-                    backoff_coefficient=2.0
-                )
-            )
-        
-        elif operation == 'logs':
-            if not param1:
-                return "Error: logs operation requires container name"
-            
-            lines = int(param2) if param2 else 100
-            return await workflow.execute_activity(
-                get_container_logs_activity,
-                args=[param1, lines],
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=2,
-                    initial_interval=timedelta(seconds=1),
-                    maximum_interval=timedelta(seconds=5),
-                    backoff_coefficient=2.0
-                )
-            )
-        
-        elif operation == 'restart':
-            if not param1:
-                return "Error: restart operation requires container name"
-            
-            return await workflow.execute_activity(
-                restart_container_activity,
-                param1,
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=5,
-                    initial_interval=timedelta(seconds=5),
-                    maximum_interval=timedelta(seconds=30),
-                    backoff_coefficient=2.0
-                )
-            )
-        
-        else:
-            return f"Unknown operation: {operation}"
