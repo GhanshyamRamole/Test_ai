@@ -11,13 +11,14 @@ from config import TEMPORAL_HOST
 from unified_agent.workflow import UnifiedAgentWorkflow, unified_orchestrator_activity
 
 # Import all underlying activities
-from docker_monitor.docker_temporal_agent import (
+
+from providers.infra_monitor.docker_temporal_agent import (
     get_container_status_activity,
     check_container_health_activity,
     get_container_logs_activity,
     restart_container_activity
 )
-from simple_agent.temporal_agent import (
+from providers.utility.temporal_agent import(
     get_time_activity,
     get_weather_activity,
     get_fact_activity
